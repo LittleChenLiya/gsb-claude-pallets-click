@@ -192,6 +192,20 @@ def iter_params_for_processing(
     return sorted(declaration_order, key=sort_key)
 
 
+def _source_label(source: ParameterSource) -> str:
+    """Return a human-readable label for a :class:`ParameterSource`.
+
+    Used in mutually exclusive group error messages to indicate where a
+    conflicting value came from, without revealing the value itself.
+    """
+    return {
+        ParameterSource.COMMANDLINE: _("command line"),
+        ParameterSource.ENVIRONMENT: _("environment"),
+        ParameterSource.DEFAULT_MAP: _("default map"),
+        ParameterSource.PROMPT: _("prompt"),
+    }.get(source, _("default"))
+
+
 class ParameterSource(enum.IntEnum):
     """This is an :class:`~enum.IntEnum` that indicates the source of a
     parameter's value.
@@ -229,6 +243,64 @@ class ParameterSource(enum.IntEnum):
     """Used a default provided by :attr:`Context.default_map`."""
     DEFAULT = enum.auto()
     """Used the default specified by the parameter."""
+
+
+class MutuallyExclusiveGroup:
+    """A group of parameters where at most one member may be explicitly
+    selected.
+
+    An explicit selection is a value provided on the command line, through
+    an environment variable, via :attr:`Context.default_map`, or through a
+    prompt. A parameter's own :attr:`~Parameter.default` does not count as a
+    selection, so a member that merely falls back to its default value never
+    conflicts with an explicitly selected member.
+
+    :param name: an optional name (alias) for the group. It is used in error
+                 messages to identify the group.
+    :param required: if ``True``, exactly one member must be explicitly
+                     selected. If no member is selected and a member has
+                     prompting enabled, that member is prompted for.
+
+    Members are added automatically when a :class:`Parameter` is constructed
+    with ``group=<this group>``. A parameter may also reference a group by
+    its :attr:`name` as a string; the reference is resolved against the
+    groups declared on the command.
+
+    .. code-block:: python
+
+        auth = click.MutuallyExclusiveGroup(name="auth", required=True)
+
+        @click.command()
+        @click.option("--token", envvar="TOKEN", group=auth)
+        @click.option("--profile", group=auth)
+        def login(token, profile):
+            ...
+
+    .. versionadded:: 8.5.0
+    """
+
+    def __init__(self, name: str | None = None, required: bool = False) -> None:
+        self.name = name
+        self.required = required
+        self._members: list[Parameter] = []
+
+    def add(self, param: Parameter) -> None:
+        """Register ``param`` as a member of this group.
+
+        This is called automatically by :class:`Parameter` and :class:`Option`
+        when they are constructed with ``group=<this group>``.
+        """
+        if param not in self._members:
+            self._members.append(param)
+
+    @property
+    def members(self) -> list[Parameter]:
+        """The parameters that belong to this group, in the order they were
+        added (which matches the declaration order for typical usage)."""
+        return list(self._members)
+
+    def __repr__(self) -> str:
+        return f"<MutuallyExclusiveGroup name={self.name!r} required={self.required}>"
 
 
 class Context:
@@ -537,6 +609,11 @@ class Context:
         # parameter name and both fall back to their default value.
         # Refs: https://github.com/pallets/click/issues/3403
         self._param_default_explicit = {}
+        # The names of mutually-exclusive-group members that should be
+        # prompted for, because their group is required and no other member
+        # was explicitly selected. Populated by
+        # :meth:`Command._resolve_mutually_exclusive_groups`.
+        self._group_prompt_required: set[str] = set()
         self._exit_stack = ExitStack()
 
     @property
@@ -1396,6 +1473,11 @@ class Command:
         parser = self.make_parser(ctx)
         opts, args, param_order = parser.parse_args(args=args)
 
+        # Resolve mutually exclusive groups before any member's callback is
+        # allowed to run. This detects conflicts and decides whether a
+        # required group should prompt, all without executing callbacks.
+        self._resolve_mutually_exclusive_groups(ctx, opts, param_order)
+
         for param in iter_params_for_processing(param_order, self.get_params(ctx)):
             _, args = param.handle_parse_result(ctx, opts, args)
 
@@ -1424,6 +1506,122 @@ class Command:
         ctx.args = args
         ctx._opt_prefixes.update(parser._opt_prefixes)
         return args
+
+    def _resolve_mutually_exclusive_groups(
+        self,
+        ctx: Context,
+        opts: cabc.Mapping[str, t.Any],
+        param_order: cabc.Sequence[Parameter],
+    ) -> None:
+        """Resolve all mutually exclusive groups declared on this command.
+
+        For every group, determine which members were explicitly selected
+        (command line, environment, or default map). If more than one member
+        was selected, raise a :exc:`UsageError` before any member's callback
+        runs. If no member was selected and the group is required, mark the
+        first prompt-enabled member for prompting.
+
+        :param param_order: the parameters explicitly provided on the command
+                            line, in invocation order.
+
+        :meta private:
+        """
+        params = self.get_params(ctx)
+        provided = set(param_order)
+
+        # Build a registry of named groups so parameters can also reference a
+        # group by its name (alias) as a string.
+        registry: dict[str, MutuallyExclusiveGroup] = {}
+        for param in params:
+            group = getattr(param, "group", None)
+            if isinstance(group, MutuallyExclusiveGroup) and group.name:
+                registry[group.name] = group
+
+        # Build the group -> members mapping, resolving string references.
+        groups: dict[MutuallyExclusiveGroup, list[Parameter]] = {}
+        for param in params:
+            group = getattr(param, "group", None)
+            if group is None:
+                continue
+            if isinstance(group, str):
+                group_name = group
+                group = registry.get(group_name)
+                if group is None:
+                    # An implicit, non-required group referenced by name only.
+                    group = MutuallyExclusiveGroup(name=group_name, required=False)
+                    registry[group_name] = group
+            if group is None:
+                continue
+            groups.setdefault(group, []).append(param)
+
+        for group, members in groups.items():
+            selections: list[tuple[Parameter, ParameterSource]] = []
+            for param in members:
+                source = param.detect_source(ctx, opts, provided)
+                if source != ParameterSource.DEFAULT:
+                    selections.append((param, source))
+
+            if len(selections) > 1:
+                raise self._mutual_exclusion_error(ctx, group, selections)
+
+            if len(selections) == 0 and group.required:
+                # The group needs a selection but nothing was explicitly
+                # provided. Prompt the first member that allows it; if none
+                # does, the requirement cannot be satisfied, so fail.
+                for param in members:
+                    if getattr(param, "prompt", None) is not None:
+                        ctx._group_prompt_required.add(param.name)
+                        break
+                else:
+                    raise self._missing_group_selection_error(ctx, group, members)
+
+    def _missing_group_selection_error(
+        self,
+        ctx: Context,
+        group: MutuallyExclusiveGroup,
+        members: list[Parameter],
+    ) -> UsageError:
+        """Build a :exc:`UsageError` for a required group with no selection.
+
+        :meta private:
+        """
+        hints = ", ".join(param.get_error_hint(ctx) for param in members)
+        if group.name:
+            message = _(
+                "Mutually exclusive group {name!r} requires one of: {hints}."
+            ).format(name=group.name, hints=hints)
+        else:
+            message = _("One of {hints} is required.").format(hints=hints)
+        return UsageError(message, ctx)
+
+    def _mutual_exclusion_error(
+        self,
+        ctx: Context,
+        group: MutuallyExclusiveGroup,
+        selections: list[tuple[Parameter, ParameterSource]],
+    ) -> UsageError:
+        """Build a :exc:`UsageError` describing the conflicting group members.
+
+        The message names the conflicting parameters and their sources but
+        never includes the values that were provided.
+
+        :meta private:
+        """
+        if group.name:
+            prefix = _(
+                "Mutually exclusive options in group {name!r} cannot be used"
+                " together: "
+            ).format(name=group.name)
+        else:
+            prefix = _("Mutually exclusive options cannot be used together: ")
+
+        parts = []
+        for param, source in selections:
+            hint = param.get_error_hint(ctx)
+            parts.append(f"{hint} ({_source_label(source)})")
+
+        message = prefix + ", ".join(parts)
+        return UsageError(message, ctx)
 
     def invoke(self, ctx: Context) -> t.Any:
         """Given a context, this invokes the attached callback (if it exists)
@@ -2382,6 +2580,7 @@ class Parameter(ABC):
         | None = None,
         deprecated: bool | str = False,
         help: str | None = None,
+        group: MutuallyExclusiveGroup | str | None = None,
     ) -> None:
         self.name, self.opts, self.secondary_opts = self._parse_decls(
             param_decls or (), expose_value
@@ -2413,6 +2612,13 @@ class Parameter(ABC):
         self.envvar = envvar
         self._custom_shell_complete = shell_complete
         self.deprecated = deprecated
+        self.group = group
+
+        # Register this parameter with the group it belongs to. A string
+        # reference is resolved later, against the groups declared on the
+        # command, so it cannot be registered here.
+        if isinstance(group, MutuallyExclusiveGroup):
+            group.add(self)
 
         if help:
             help = inspect.cleandoc(help)
@@ -2582,6 +2788,44 @@ class Parameter(ABC):
 
     @abstractmethod
     def add_to_parser(self, parser: _OptionParser, ctx: Context) -> None: ...
+
+    def detect_source(
+        self,
+        ctx: Context,
+        opts: cabc.Mapping[str, t.Any],
+        provided: cabc.Container[Parameter] | None = None,
+    ) -> ParameterSource:
+        """Detect the source of this parameter's value without prompting or
+        running any callback.
+
+        This is a non-interactive variant of :meth:`consume_value` used to
+        resolve mutually exclusive groups before any member's callback is
+        allowed to run. It reports where a value would come from, but does
+        not trigger a prompt, a type cast, or a callback.
+
+        :param provided: the parameters explicitly provided on the command
+                         line, used to distinguish feature-switch options that
+                         share a name.
+
+        :meta private:
+        """
+        if provided is not None:
+            commandline = self in provided
+        else:
+            commandline = opts.get(self.name, UNSET) is not UNSET
+
+        if commandline:
+            return ParameterSource.COMMANDLINE
+
+        envvar_value = self.value_from_envvar(ctx)
+        if envvar_value is not None:
+            return ParameterSource.ENVIRONMENT
+
+        default_map_value = ctx.lookup_default(self.name)
+        if default_map_value is not None or ctx._default_map_has(self.name):
+            return ParameterSource.DEFAULT_MAP
+
+        return ParameterSource.DEFAULT
 
     def consume_value(
         self, ctx: Context, opts: cabc.Mapping[str, t.Any]
@@ -3071,6 +3315,7 @@ class Option(Parameter):
         show_choices: bool = True,
         show_envvar: bool = False,
         deprecated: bool | str = False,
+        group: MutuallyExclusiveGroup | str | None = None,
         **attrs: t.Any,
     ) -> None:
         super().__init__(
@@ -3079,6 +3324,7 @@ class Option(Parameter):
             multiple=multiple,
             deprecated=deprecated,
             help=help,
+            group=group,
             **attrs,
         )
 
@@ -3771,13 +4017,25 @@ class Option(Parameter):
         elif (
             (value is UNSET or source >= ParameterSource.DEFAULT_MAP)
             and self.prompt is not None
-            and (self.required or self.prompt_required)
             and not ctx.resilient_parsing
+            and (
+                self.required
+                or (self.prompt_required and self.group is None)
+                or self._group_prompt_required(ctx)
+            )
         ):
             value = self.prompt_for_value(ctx)
             source = ParameterSource.PROMPT
 
         return value, source
+
+    def _group_prompt_required(self, ctx: Context) -> bool:
+        """Whether this option should prompt because its mutually exclusive
+        group is required and no other member was explicitly selected.
+
+        :meta private:
+        """
+        return self.name in ctx._group_prompt_required
 
     def process_value(self, ctx: Context, value: t.Any) -> t.Any:
         # process_value has to be overridden on Options in order to capture

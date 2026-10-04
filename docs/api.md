@@ -203,6 +203,12 @@ classes and functions.
     :member-order: bysource
 ```
 
+```{eval-rst}
+.. autoclass:: MutuallyExclusiveGroup
+    :members:
+    :member-order: bysource
+```
+
 (click-api-types)=
 
 ## Types

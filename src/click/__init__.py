@@ -12,6 +12,7 @@ from .core import Command as Command
 from .core import CommandCollection as CommandCollection
 from .core import Context as Context
 from .core import Group as Group
+from .core import MutuallyExclusiveGroup as MutuallyExclusiveGroup
 from .core import Option as Option
 from .core import Parameter as Parameter
 from .core import ParameterSource as ParameterSource
