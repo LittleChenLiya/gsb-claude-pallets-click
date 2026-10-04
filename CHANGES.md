@@ -2,6 +2,15 @@
 
 Unreleased
 
+- Add `MutuallyExclusiveGroup` and the `mutually_exclusive` decorator to
+  declare an explicit group of mutually exclusive parameters. At most one
+  member may be selected from the command line, an environment variable, or
+  the `default_map`; a plain `default` never counts as a selection. A group
+  can optionally require exactly one selection, prompting a promptable
+  member only when nothing else in the group was selected. Conflicts are
+  reported with the parameters and their value sources (never the values)
+  before any member callback runs.
+
 - A parameter name that is not a valid Python identifier, or that is a Python
   keyword, is deprecated and raises `TypeError` in Click 9.0. {pr}`3866`
 - An {class}`Option` name written as a Python identifier is deprecated when it

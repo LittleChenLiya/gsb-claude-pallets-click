@@ -798,3 +798,82 @@ value will be `flag_value`.
     invoke(hello, args=["--name", "Value"])
     invoke(hello, args=["--name"])
 ```
+
+## Mutually Exclusive Options
+
+{versionadded}`8.6.0`
+
+A set of options can be declared *mutually exclusive* with
+{class}`~click.MutuallyExclusiveGroup` or the
+{func}`~click.mutually_exclusive` shortcut. At most one member of the
+group may be *selected*. A member counts as selected when its value comes
+from the command line, an environment variable, a prompt, or the
+`default_map`, following the existing {class}`~click.ParameterSource`
+precedence. A plain parameter `default` does **not** count as a
+selection, so a defaulted member never conflicts with a selected one.
+
+```{eval-rst}
+.. click:example::
+
+    @click.command()
+    @click.mutually_exclusive("token", "profile")
+    @click.option("--token", envvar="APP_TOKEN")
+    @click.option("--profile")
+    def login(token, profile):
+        click.echo(f"token={token} profile={profile}")
+```
+
+Passing both options, or providing one through the environment and the
+other on the command line, fails with a usage error that names the
+conflicting parameters and the sources of their values. The values
+themselves are never shown, and no member `callback` is invoked when the
+check fails:
+
+```text
+$ APP_TOKEN=secret login --profile dev
+Usage: login [OPTIONS]
+Try 'login --help' for help.
+
+Error: Mutually exclusive parameters cannot be used together:
+'--token' (from environment variable 'APP_TOKEN'), '--profile' (from
+command line).
+```
+
+A group can require exactly one selection with `required=True`. If
+nothing was selected and a member has `prompt` enabled, that prompt is
+shown to obtain the missing value; the prompt only appears when no other
+member of the group was selected. Without a promptable member, a usage
+error is raised instead:
+
+```{eval-rst}
+.. click:example::
+
+    @click.command()
+    @click.mutually_exclusive("token", "profile", required=True)
+    @click.option("--token", prompt=True)
+    @click.option("--profile")
+    def login(token, profile):
+        click.echo(f"token={token} profile={profile}")
+
+.. click:run::
+
+    invoke(login, args=[], input="s3cr3t")
+    invoke(login, args=["--profile", "dev"])
+```
+
+A group instance can also be created explicitly and shared between
+commands; it is applied as a decorator, either below `@click.command()`
+(decorating the callback) or above it (decorating the command):
+
+```{eval-rst}
+.. click:example::
+
+    auth = click.MutuallyExclusiveGroup("token", "profile")
+
+    @click.command()
+    @auth
+    @click.option("--token")
+    @click.option("--profile")
+    def login(token, profile):
+        click.echo(f"token={token} profile={profile}")
+```

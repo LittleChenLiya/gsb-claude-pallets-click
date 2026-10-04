@@ -9,6 +9,7 @@ from .core import Argument
 from .core import Command
 from .core import Context
 from .core import Group
+from .core import MutuallyExclusiveGroup
 from .core import Option
 from .core import Parameter
 from .globals import get_current_context
@@ -375,6 +376,43 @@ def option(
         return f
 
     return decorator
+
+
+def mutually_exclusive(
+    *param_names: str, required: bool = False, name: str | None = None
+) -> MutuallyExclusiveGroup:
+    """Declare that the named parameters of a command are mutually
+    exclusive: at most one of them may be selected from the command line,
+    an environment variable, or the ``default_map``. A plain parameter
+    ``default`` does not count as a selection.
+
+    This is a shortcut creating a :class:`MutuallyExclusiveGroup` and
+    applying it as a decorator. It can be placed below
+    :func:`click.command` (decorating the callback) or above it
+    (decorating the command)::
+
+        @click.command()
+        @click.mutually_exclusive("token", "profile", required=True)
+        @click.option("--token", envvar="TOKEN")
+        @click.option("--profile")
+        def cli(token, profile):
+            ...
+
+    On conflict a :exc:`~click.UsageError` is raised naming the
+    conflicting parameters and the sources of their values, before any
+    member ``callback`` is invoked.
+
+    :param param_names: the names of at least two parameters of the same
+        command.
+    :param required: if ``True``, exactly one of the parameters must be
+        selected. If none is selected and a member has ``prompt``
+        enabled, that prompt is shown; otherwise a usage error is raised.
+    :param name: an optional label for the group, only used in error
+        messages.
+
+    .. versionadded:: 8.6.0
+    """
+    return MutuallyExclusiveGroup(*param_names, required=required, name=name)
 
 
 def confirmation_option(*param_decls: str, **kwargs: t.Any) -> t.Callable[[FC], FC]:

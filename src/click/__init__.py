@@ -12,6 +12,7 @@ from .core import Command as Command
 from .core import CommandCollection as CommandCollection
 from .core import Context as Context
 from .core import Group as Group
+from .core import MutuallyExclusiveGroup as MutuallyExclusiveGroup
 from .core import Option as Option
 from .core import Parameter as Parameter
 from .core import ParameterSource as ParameterSource
@@ -22,6 +23,7 @@ from .decorators import custom_version_option as custom_version_option
 from .decorators import group as group
 from .decorators import help_option as help_option
 from .decorators import make_pass_decorator as make_pass_decorator
+from .decorators import mutually_exclusive as mutually_exclusive
 from .decorators import option as option
 from .decorators import pass_context as pass_context
 from .decorators import pass_obj as pass_obj

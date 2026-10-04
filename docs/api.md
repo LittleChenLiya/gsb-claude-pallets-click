@@ -30,6 +30,10 @@ classes and functions.
 ```
 
 ```{eval-rst}
+.. autofunction:: mutually_exclusive
+```
+
+```{eval-rst}
 .. autofunction:: password_option
 ```
 
@@ -184,6 +188,11 @@ classes and functions.
 
 ```{eval-rst}
 .. autoclass:: Argument
+```
+
+```{eval-rst}
+.. autoclass:: MutuallyExclusiveGroup
+   :members:
 ```
 
 ## Context
