@@ -2,6 +2,14 @@
 
 Unreleased
 
+- A `Group` with `chain=True` accepts a new `pipeline` mode. Each
+  subcommand's return value is passed to the next subcommand through the
+  read-only `Context.pipeline_input` attribute, without touching
+  `Context.obj` or the subcommand's CLI arguments. A subcommand declares
+  the type it expects with the new `Command.pipeline_input_type`
+  parameter, which is validated before its callback runs. Only picklable
+  basic container values may flow through the pipeline, and the list of
+  return values passed to `result_callback` is unchanged.
 - A parameter name that is not a valid Python identifier, or that is a Python
   keyword, is deprecated and raises `TypeError` in Click 9.0. {pr}`3866`
 - An {class}`Option` name written as a Python identifier is deprecated when it

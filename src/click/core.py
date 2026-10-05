@@ -105,6 +105,79 @@ def _echo_aborted() -> None:
     echo(_("Aborted!"), file=sys.stderr)
 
 
+#: Scalar types that are allowed to flow through a pipeline chain.
+_PIPELINE_SCALAR_TYPES: tuple[
+    type[None], type[bool], type[int], type[float], type[str], type[bytes]
+] = (type(None), bool, int, float, str, bytes)
+
+#: Container types that are allowed to flow through a pipeline chain,
+#: provided their items are allowed as well.
+_PIPELINE_CONTAINER_TYPES: tuple[
+    type[list[t.Any]], type[tuple[t.Any, ...]], type[set[t.Any]], type[frozenset[t.Any]]
+] = (list, tuple, set, frozenset)
+
+
+def _is_pipeline_value(value: t.Any) -> bool:
+    """Check if a value is a basic container value that may be passed
+    between the commands of a :class:`Group` with ``pipeline`` enabled.
+    """
+    if isinstance(value, _PIPELINE_SCALAR_TYPES):
+        return True
+
+    if isinstance(value, _PIPELINE_CONTAINER_TYPES):
+        return all(_is_pipeline_value(item) for item in value)
+
+    if isinstance(value, dict):
+        return all(
+            _is_pipeline_value(key) and _is_pipeline_value(item)
+            for key, item in value.items()
+        )
+
+    return False
+
+
+def _check_pipeline_value(value: t.Any, ctx: Context) -> None:
+    """Validate a value returned by a command in a pipeline chain before
+    it is passed to the next command. Only picklable basic container
+    values are supported.
+
+    :param value: The return value to check.
+    :param ctx: The context of the command that produced the value.
+
+    .. versionadded:: 8.6.0
+    """
+    import pickle
+
+    if _is_pipeline_value(value):
+        try:
+            pickle.dumps(value)
+            return
+        except Exception:
+            pass
+
+    raise UsageError(
+        _(
+            "Command {name!r} returned a value that cannot be passed"
+            " through a pipeline. Only picklable basic container values"
+            " are supported."
+        ).format(name=ctx.info_name),
+        ctx=ctx,
+    )
+
+
+def _format_pipeline_types(
+    expected: type | tuple[type, ...],
+) -> str:
+    """Format the expected pipeline input type(s) for an error message.
+
+    .. versionadded:: 8.6.0
+    """
+    if isinstance(expected, type):
+        expected = (expected,)
+
+    return " or ".join(item.__name__ for item in expected)
+
+
 def _outside_click_stacklevel() -> int:
     """Depth of the first stack frame outside Click.
 
@@ -408,6 +481,11 @@ class Context:
         self.obj = obj
         self._meta = getattr(parent, "meta", {})
 
+        #: The value passed from the previous command of a :class:`Group`
+        #: with ``chain`` and ``pipeline`` enabled. Access it through the
+        #: read-only :attr:`pipeline_input` property.
+        self._pipeline_input: t.Any = None
+
         #: A dictionary (-like object) with defaults for parameters.
         if (
             default_map is None
@@ -538,6 +616,20 @@ class Context:
         # Refs: https://github.com/pallets/click/issues/3403
         self._param_default_explicit = {}
         self._exit_stack = ExitStack()
+
+    @property
+    def pipeline_input(self) -> t.Any:
+        """The value returned by the previous command of a :class:`Group`
+        with ``chain`` and ``pipeline`` enabled. The first command in a
+        pipeline receives ``None``.
+
+        This is read-only, and is kept separate from :attr:`obj` and the
+        command's parsed parameters, so it never replaces CLI arguments.
+        Each invocation of the group starts again from an empty input.
+
+        .. versionadded:: 8.6.0
+        """
+        return self._pipeline_input
 
     @property
     def protected_args(self) -> list[str]:
@@ -1009,6 +1101,16 @@ class Command:
                         indicating that the command is deprecated and highlights
                         its deprecation in --help. The message can be customized
                         by using a string as the value.
+    :param pipeline_input_type: The type (or tuple of types) this command
+                        expects to receive through
+                        :attr:`Context.pipeline_input` when invoked as part
+                        of a :class:`Group` with ``chain`` and ``pipeline``
+                        enabled. The contract is validated before the
+                        command's callback is invoked. ``None`` (the
+                        default) accepts any pipeline input.
+
+    .. versionadded:: 8.6.0
+        The ``pipeline_input_type`` parameter.
 
     .. versionchanged:: 8.2
         This is the base class for all commands, not ``BaseCommand``.
@@ -1057,6 +1159,7 @@ class Command:
     no_args_is_help: bool
     hidden: bool
     deprecated: bool | str
+    pipeline_input_type: type | tuple[type, ...] | None
 
     def __init__(
         self,
@@ -1072,6 +1175,7 @@ class Command:
         no_args_is_help: bool = False,
         hidden: bool = False,
         deprecated: bool | str = False,
+        pipeline_input_type: type | tuple[type, ...] | None = None,
     ) -> None:
         #: the name the command thinks it has.  Upon registering a command
         #: on a :class:`Group` the group will default the command name
@@ -1101,6 +1205,11 @@ class Command:
         self.no_args_is_help = no_args_is_help
         self.hidden = hidden
         self.deprecated = deprecated
+        #: The type (or tuple of types) this command expects to receive
+        #: through :attr:`Context.pipeline_input` in a pipeline chain.
+        #: Validated before the callback is invoked. ``None`` accepts
+        #: any pipeline input.
+        self.pipeline_input_type = pipeline_input_type
 
     def to_info_dict(self, ctx: Context) -> dict[str, t.Any]:
         return {
@@ -1711,6 +1820,16 @@ class Group(Command):
     :param chain: Allow passing more than one subcommand argument. After parsing
         a command's arguments, if any arguments remain another command will be
         matched, and so on.
+    :param pipeline: Requires ``chain``. Pass each subcommand's return value
+        to the next subcommand through the read-only
+        :attr:`Context.pipeline_input` attribute, without touching
+        :attr:`Context.obj` or the subcommand's CLI arguments. Only
+        picklable basic container values (scalars, lists, tuples, dicts,
+        and sets of those) may flow through the pipeline. A subcommand can
+        declare the type it expects with
+        :attr:`Command.pipeline_input_type`, which is validated before its
+        callback is invoked. The list of all return values is still passed
+        to the ``result_callback`` unchanged.
     :param result_callback: A function to call after the group's and
         subcommand's callbacks. The value returned by the subcommand is passed.
         If ``chain`` is enabled, the value will be a list of values returned by
@@ -1724,6 +1843,9 @@ class Group(Command):
 
     .. versionchanged:: 8.2
         Merged with and replaces the ``MultiCommand`` base class.
+
+    .. versionadded:: 8.6.0
+        The ``pipeline`` parameter.
     """
 
     allow_extra_args = True
@@ -1753,6 +1875,7 @@ class Group(Command):
     invoke_without_command: bool
     subcommand_metavar: str
     chain: bool
+    pipeline: bool
     _result_callback: t.Callable[..., t.Any] | None
 
     def __init__(
@@ -1766,6 +1889,7 @@ class Group(Command):
         subcommand_metavar: str | None = None,
         chain: bool = False,
         result_callback: t.Callable[..., t.Any] | None = None,
+        pipeline: bool = False,
         **kwargs: t.Any,
     ) -> None:
         super().__init__(name, **kwargs)
@@ -1799,6 +1923,14 @@ class Group(Command):
 
         self.subcommand_metavar = subcommand_metavar
         self.chain = chain
+
+        if pipeline and not chain:
+            raise RuntimeError("A group in pipeline mode must also enable chain mode.")
+
+        #: Pass each subcommand's return value to the next subcommand
+        #: through :attr:`Context.pipeline_input`. Requires
+        #: :attr:`chain`.
+        self.pipeline = pipeline
         # The result callback that is stored. This can be set or
         # overridden with the :func:`result_callback` decorator.
         self._result_callback = result_callback
@@ -1825,7 +1957,7 @@ class Group(Command):
             with sub_ctx.scope(cleanup=False):
                 commands[name] = command.to_info_dict(sub_ctx)
 
-        info_dict.update(commands=commands, chain=self.chain)
+        info_dict.update(commands=commands, chain=self.chain, pipeline=self.pipeline)
         return info_dict
 
     def add_command(self, cmd: Command, name: str | None = None) -> None:
@@ -2108,9 +2240,45 @@ class Group(Command):
                 args, sub_ctx.args = sub_ctx.args, []
 
             rv = []
+            # In pipeline mode each subcommand's return value is handed
+            # to the next subcommand through the read-only
+            # ``Context.pipeline_input`` attribute. The state is local to
+            # this invocation, so a later invocation of the group starts
+            # again from an empty input and a failed run leaves no
+            # intermediate values behind.
+            pipeline_value: t.Any = None
             for sub_ctx in contexts:
+                if self.pipeline:
+                    # Validate the consumer contract before the
+                    # subcommand's callback is invoked.
+                    expected = getattr(sub_ctx.command, "pipeline_input_type", None)
+
+                    if expected is not None and not isinstance(
+                        pipeline_value, expected
+                    ):
+                        raise UsageError(
+                            _(
+                                "Command {name!r} expected pipeline input of"
+                                " type {expected}, but the previous command"
+                                " produced {actual}."
+                            ).format(
+                                name=sub_ctx.info_name,
+                                expected=_format_pipeline_types(expected),
+                                actual=type(pipeline_value).__name__,
+                            ),
+                            ctx=sub_ctx,
+                        )
+
+                    sub_ctx._pipeline_input = pipeline_value
+
                 with sub_ctx:
-                    rv.append(sub_ctx.command.invoke(sub_ctx))
+                    stage_rv = sub_ctx.command.invoke(sub_ctx)
+
+                    if self.pipeline:
+                        _check_pipeline_value(stage_rv, sub_ctx)
+                        pipeline_value = stage_rv
+
+                    rv.append(stage_rv)
             return _process_result(rv)
 
     def resolve_command(

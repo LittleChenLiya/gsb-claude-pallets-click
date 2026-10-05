@@ -1,0 +1,11 @@
+$ pipeline_
+
+  pipeline is an example of a chained group with ``pipeline=True``.
+  Each of the three stages returns a basic container value that the
+  next stage reads through the read-only ``Context.pipeline_input``
+  attribute, without touching ``ctx.obj`` or the stage's CLI arguments.
+
+Usage:
+
+  $ pip install --editable .
+  $ pipeline load --path data.csv filter --column kind --keep x summarize

@@ -1,0 +1,18 @@
+[project]
+name = "click-example-pipeline"
+version = "1.0.0"
+description = "Click pipeline chain example"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.6",
+]
+
+[project.scripts]
+pipeline = "pipeline:cli"
+
+[build-system]
+requires = ["flit_core<4"]
+build-backend = "flit_core.buildapi"
+
+[tool.flit.module]
+name = "pipeline"
