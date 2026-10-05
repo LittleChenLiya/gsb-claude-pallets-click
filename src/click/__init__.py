@@ -40,6 +40,11 @@ from .exceptions import UsageError as UsageError
 from .formatting import HelpFormatter as HelpFormatter
 from .formatting import wrap_text as wrap_text
 from .globals import get_current_context as get_current_context
+from .lazy import LazyCommandRecursionError as LazyCommandRecursionError
+from .lazy import LazyEntry as LazyEntry
+from .lazy import LazyGroup as LazyGroup
+from .lazy import LazyLoadError as LazyLoadError
+from .lazy import LazyManifest as LazyManifest
 from .termui import clear as clear
 from .termui import confirm as confirm
 from .termui import echo_via_pager as echo_via_pager

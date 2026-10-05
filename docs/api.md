@@ -171,6 +171,29 @@ classes and functions.
    :members:
 ```
 
+```{eval-rst}
+.. autoclass:: LazyManifest
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: LazyEntry
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: LazyGroup
+   :members:
+```
+
+```{eval-rst}
+.. autoexception:: LazyLoadError
+```
+
+```{eval-rst}
+.. autoexception:: LazyCommandRecursionError
+```
+
 ## Parameters
 
 ```{eval-rst}

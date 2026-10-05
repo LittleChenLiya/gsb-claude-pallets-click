@@ -465,3 +465,56 @@ know:
 - When a Click script is invoked as command line application (through
   {meth}`Command.main`) the return value is ignored unless the
   `standalone_mode` is disabled in which case it's bubbled through.
+
+## Lazy Groups
+
+```{versionadded} 8.6.0
+```
+
+A {class}`LazyGroup` describes its subcommands with an immutable
+{class}`LazyManifest` instead of constructing them up front. Each
+{class}`LazyEntry` stores the command name, a one-line description, and a
+zero-argument **loader** callable that imports the command's module and
+returns the {class}`Command`.
+
+Showing the group's `--help` and generating shell completions only reads
+the manifest; no loader is called and no command module is imported:
+
+```python
+import click
+
+
+def load_sync():
+    from myapp.commands import sync  # imported only when needed
+    return sync.cli
+
+
+cli = click.LazyGroup(
+    help="A tool with many subcommands.",
+    manifest=click.LazyManifest(
+        [click.LazyEntry("sync", "Synchronize the data.", load_sync)]
+    ),
+)
+```
+
+Only when `sync` is selected for execution (`tool sync ...`) or its own
+help page (`tool sync --help`) is `load_sync` called. Loading follows
+these rules:
+
+- A successful load is cached and shared by every later lookup, across
+  threads. The loader for a name runs at most once, so concurrent
+  invocations of the same command never construct two commands.
+- The user loader runs outside Click's internal coordination lock.
+- If a loader raises, the failure is not cached. The load is reported to
+  every thread waiting on it, and the next explicit lookup retries the
+  loader with a fresh attempt. `ClickException` failures are reported as
+  they are; other exceptions are wrapped in {class}`LazyLoadError`.
+- If a loader recursively triggers another load that loops back to an
+  entry already loading on the same thread, a
+  {class}`LazyCommandRecursionError` is raised and its `chain` attribute
+  lists the full cycle (for example `("p", "q", "p")`).
+
+The manifest cannot change after construction: `add_command` is disabled
+on {class}`LazyGroup`, and a manifest rejects duplicate, empty, or
+invalid entries when it is created. Declaration order is preserved in
+help listings. Regular {class}`Group` behavior is not affected.

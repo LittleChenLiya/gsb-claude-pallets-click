@@ -2,6 +2,14 @@
 
 Unreleased
 
+- Add {class}`LazyGroup`, backed by an immutable {class}`LazyManifest` of
+  {class}`LazyEntry` names, short helps, and loaders. Top-level help and shell
+  completion use the manifest without importing command modules; a loader runs
+  only when its command is selected. Successful loads are cached and shared
+  across threads (concurrent same-name loads construct one command), a failed
+  load is not cached and is retried on the next explicit lookup, and same-thread
+  recursive loads raise {class}`LazyCommandRecursionError` with the load chain.
+  Regular {class}`Group` is unchanged.
 - A parameter name that is not a valid Python identifier, or that is a Python
   keyword, is deprecated and raises `TypeError` in Click 9.0. {pr}`3866`
 - An {class}`Option` name written as a Python identifier is deprecated when it
