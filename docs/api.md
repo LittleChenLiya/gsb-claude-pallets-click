@@ -66,6 +66,10 @@ classes and functions.
 
 ```
 
+```{eval-rst}
+.. autofunction:: pipeline_input
+```
+
 ## Utilities
 
 ```{eval-rst}

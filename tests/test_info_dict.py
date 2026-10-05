@@ -88,6 +88,7 @@ HELLO_GROUP = (
         "deprecated": False,
         "commands": {"hello": HELLO_COMMAND[1]},
         "chain": False,
+        "pipeline": False,
     },
 )
 
@@ -245,6 +246,7 @@ def test_parameter(obj, expect):
                     },
                 },
                 "chain": False,
+                "pipeline": False,
             },
             id="Nested Group",
         ),

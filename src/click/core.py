@@ -146,6 +146,67 @@ def batch(iterable: cabc.Iterable[V], batch_size: int) -> list[tuple[V, ...]]:
     return list(zip(*repeat(iter(iterable), batch_size), strict=False))
 
 
+#: Sentinel for "the command does not consume the previous stage's value",
+#: distinct from an explicit ``None`` contract.
+_PIPELINE_NO_CONTRACT = object()
+
+
+def _validate_pipeline_value(value: t.Any, path: str = "pipeline_input") -> None:
+    """Validate that a pipeline intermediate value is a serializable basic
+    container (or a basic scalar).
+
+    Only ``None``, :class:`bool`, :class:`int`, :class:`float`, :class:`str`,
+    :class:`dict`, :class:`list`, and :class:`tuple` are supported, and
+    containers may only contain other supported values.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return
+
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, (str, int, float, bool, type(None))):
+                raise TypeError(
+                    "Pipeline intermediate values may only contain basic"
+                    f" scalar keys, got {type(key).__name__!r} at {path}."
+                )
+            _validate_pipeline_value(item, f"{path}[{key!r}]")
+        return
+
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _validate_pipeline_value(item, f"{path}[{index}]")
+        return
+
+    raise TypeError(
+        "Pipeline intermediate values must be serializable basic containers"
+        " (dict, list, tuple, str, int, float, bool, or None); got"
+        f" {type(value).__name__!r} at {path}."
+    )
+
+
+def _get_pipeline_contract(command: Command) -> t.Any:
+    """Return the pipeline contract declared for a command, if any.
+
+    The contract is the value passed to :func:`click.pipeline_input` (a type
+    or tuple of types), or ``None`` if the command consumes the previous
+    stage's value without declaring a type. Returns
+    :data:`_PIPELINE_NO_CONTRACT` if the command does not consume pipeline
+    input.
+    """
+    contract = getattr(command, "__click_pipeline_input__", _PIPELINE_NO_CONTRACT)
+    if contract is not _PIPELINE_NO_CONTRACT:
+        return contract
+
+    callback = command.callback
+    while callback is not None:
+        contract = getattr(callback, "__click_pipeline_input__", _PIPELINE_NO_CONTRACT)
+        if contract is not _PIPELINE_NO_CONTRACT:
+            return contract
+        callback = getattr(callback, "__wrapped__", None)
+
+    return _PIPELINE_NO_CONTRACT
+
+
 @contextmanager
 def augment_usage_errors(
     ctx: Context, param: Parameter | None = None
@@ -1711,6 +1772,12 @@ class Group(Command):
     :param chain: Allow passing more than one subcommand argument. After parsing
         a command's arguments, if any arguments remain another command will be
         matched, and so on.
+    :param pipeline: Enable explicit intermediate value mode for chained
+        groups. Each stage's return value is passed to the next stage as the
+        read-only ``pipeline_input`` argument (see the ``pipeline_input``
+        decorator), without using :attr:`Context.obj` or replacing CLI
+        parameters. Only serializable basic container values are supported.
+        Requires ``chain`` to be enabled.
     :param result_callback: A function to call after the group's and
         subcommand's callbacks. The value returned by the subcommand is passed.
         If ``chain`` is enabled, the value will be a list of values returned by
@@ -1753,6 +1820,7 @@ class Group(Command):
     invoke_without_command: bool
     subcommand_metavar: str
     chain: bool
+    pipeline: bool
     _result_callback: t.Callable[..., t.Any] | None
 
     def __init__(
@@ -1765,6 +1833,7 @@ class Group(Command):
         no_args_is_help: bool | None = None,
         subcommand_metavar: str | None = None,
         chain: bool = False,
+        pipeline: bool = False,
         result_callback: t.Callable[..., t.Any] | None = None,
         **kwargs: t.Any,
     ) -> None:
@@ -1799,9 +1868,13 @@ class Group(Command):
 
         self.subcommand_metavar = subcommand_metavar
         self.chain = chain
+        self.pipeline = pipeline
         # The result callback that is stored. This can be set or
         # overridden with the :func:`result_callback` decorator.
         self._result_callback = result_callback
+
+        if self.pipeline and not self.chain:
+            raise ValueError("Pipeline mode requires chain mode to be enabled.")
 
         if self.chain:
             for param in self.params:
@@ -1825,7 +1898,7 @@ class Group(Command):
             with sub_ctx.scope(cleanup=False):
                 commands[name] = command.to_info_dict(sub_ctx)
 
-        info_dict.update(commands=commands, chain=self.chain)
+        info_dict.update(commands=commands, chain=self.chain, pipeline=self.pipeline)
         return info_dict
 
     def add_command(self, cmd: Command, name: str | None = None) -> None:
@@ -2108,10 +2181,52 @@ class Group(Command):
                 args, sub_ctx.args = sub_ctx.args, []
 
             rv = []
+            # The intermediate value flowing from one stage to the next. This
+            # is local to this invocation, so reusing the group after a
+            # failure (or invoking it again) always starts from empty input.
+            pipeline_value: t.Any = None
             for sub_ctx in contexts:
                 with sub_ctx:
-                    rv.append(sub_ctx.command.invoke(sub_ctx))
+                    if self.pipeline:
+                        self._inject_pipeline_input(sub_ctx, pipeline_value)
+                    stage_rv = sub_ctx.command.invoke(sub_ctx)
+                    rv.append(stage_rv)
+                    if self.pipeline:
+                        _validate_pipeline_value(stage_rv)
+                        pipeline_value = stage_rv
             return _process_result(rv)
+
+    def _inject_pipeline_input(self, ctx: Context, value: t.Any) -> None:
+        """Inject the previous stage's value into a consuming stage.
+
+        The consumer contract (declared with the ``pipeline_input``
+        decorator) is validated before the stage's business callback runs.
+        The value is passed as the read-only ``pipeline_input`` keyword
+        argument; it never touches :attr:`Context.obj` and never replaces a
+        CLI parameter.
+        """
+        contract = _get_pipeline_contract(ctx.command)
+        if contract is _PIPELINE_NO_CONTRACT:
+            return
+
+        # Make sure a real CLI parameter is not shadowed by the pipeline
+        # value.
+        for param in ctx.command.get_params(ctx):
+            if param.name == "pipeline_input":
+                raise UsageError(
+                    "A pipeline stage cannot declare a CLI parameter named"
+                    " 'pipeline_input'; that name is reserved for the"
+                    " previous stage's value.",
+                    ctx=ctx,
+                )
+
+        if contract is not None and not isinstance(value, contract):
+            raise TypeError(
+                f"Pipeline stage {ctx.command.name!r} expected pipeline input"
+                f" of type {contract!r}, got {type(value).__name__!r}."
+            )
+
+        ctx.params["pipeline_input"] = value
 
     def resolve_command(
         self, ctx: Context, args: list[str]

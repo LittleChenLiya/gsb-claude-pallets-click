@@ -133,6 +133,52 @@ def pass_meta_key(
 CmdType = t.TypeVar("CmdType", bound=Command)
 
 
+def pipeline_input(
+    type_: type | tuple[type, ...] | None | _AnyCallable = None,
+) -> t.Callable[[FC], FC] | FC:
+    """Mark a chained command as consuming the previous stage's pipeline value.
+
+    This is used with :class:`Group` in chain mode with ``pipeline=True``.
+    The decorated command receives the previous stage's return value as the
+    read-only ``pipeline_input`` keyword argument. The value is never stored
+    on :attr:`Context.obj` and never replaces a CLI parameter.
+
+    An optional type (or tuple of types) may be given to declare the consumer
+    contract. The value is checked against it (with :func:`isinstance`) before
+    the command's business callback is invoked; if it does not match, the
+    callback is not called and a :class:`TypeError` is raised.
+
+    Example::
+
+        @click.group(chain=True, pipeline=True)
+        def cli():
+            pass
+
+        @cli.command()
+        def stage1():
+            return {"name": "click"}
+
+        @cli.command()
+        @click.pipeline_input(dict)
+        def stage2(pipeline_input):
+            click.echo(pipeline_input["name"])
+
+    .. versionadded:: 8.6
+    """
+
+    def decorator(f: FC) -> FC:
+        f.__click_pipeline_input__ = type_  # type: ignore[attr-defined]
+        return f
+
+    # Allow using @pipeline_input without parentheses.
+    if type_ is not None and not isinstance(type_, (type, tuple)):
+        f = t.cast(FC, type_)
+        type_ = None
+        return decorator(f)
+
+    return decorator
+
+
 # variant: no call, directly as decorator for a function.
 @t.overload
 def command(name: _AnyCallable) -> Command: ...

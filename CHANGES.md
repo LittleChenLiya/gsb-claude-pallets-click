@@ -2,6 +2,10 @@
 
 Unreleased
 
+- Add a `pipeline` mode for chained groups. Each stage's return value is passed
+  to the next stage as the read-only `pipeline_input` argument (see
+  :func:`pipeline_input`), without using :attr:`Context.obj` or replacing CLI
+  parameters. Only serializable basic container values are supported.
 - A parameter name that is not a valid Python identifier, or that is a Python
   keyword, is deprecated and raises `TypeError` in Click 9.0. {pr}`3866`
 - An {class}`Option` name written as a Python identifier is deprecated when it

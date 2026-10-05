@@ -1,0 +1,11 @@
+$ pipeline_
+
+  pipeline is an example of a three-stage data pipeline using
+  chain mode with explicit intermediate values. Each stage returns
+  a serializable basic container (a dict), and the next stage reads
+  it through the read-only ``pipeline_input`` argument.
+
+Usage:
+
+  $ pip install --editable .
+  $ pipeline fetch transform report

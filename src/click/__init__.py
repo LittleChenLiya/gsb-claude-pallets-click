@@ -26,6 +26,7 @@ from .decorators import option as option
 from .decorators import pass_context as pass_context
 from .decorators import pass_obj as pass_obj
 from .decorators import password_option as password_option
+from .decorators import pipeline_input as pipeline_input
 from .decorators import version_option as version_option
 from .exceptions import Abort as Abort
 from .exceptions import BadArgumentUsage as BadArgumentUsage

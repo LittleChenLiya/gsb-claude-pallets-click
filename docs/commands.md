@@ -208,6 +208,42 @@ a context object to each command, and store and read the data on that object.
     invoke(cli, prog_name="process", args=["Click", "show", "lower", "show"])
 ```
 
+### Explicit intermediate values
+
+As an alternative to storing state on the context object, a chained group can
+pass each stage's return value directly to the next stage. Enable this with
+`pipeline=True` on the group, and mark consuming stages with the
+{func}`pipeline_input` decorator. The value is passed as the read-only
+`pipeline_input` keyword argument; it never touches `ctx.obj` and never
+replaces a CLI parameter.
+
+Only serializable basic container values are supported: `None`, `bool`,
+`int`, `float`, `str`, `dict`, `list`, and `tuple` (containers may only hold
+other supported values). An optional type (or tuple of types) can be given to
+{func}`pipeline_input` to declare the consumer contract; the value is checked
+before the stage's callback runs, and a mismatch raises `TypeError` without
+calling the callback.
+
+```python
+@click.group(chain=True, pipeline=True)
+def cli():
+    pass
+
+@cli.command()
+def fetch():
+    return {"name": "click", "value": 42}
+
+@cli.command()
+@click.pipeline_input(dict)
+def show(pipeline_input):
+    click.echo(f"{pipeline_input['name']}={pipeline_input['value']}")
+```
+
+The result callback still receives the full list of stage return values, just
+like a regular chained group. Each stage's own context resources are closed
+when that stage exits, and reusing the group after a failure starts from empty
+input with no leftover intermediate value.
+
 Another way to do this is to collect data returned by each command, then process
 it at the end of the chain. Use the group's {meth}`~Group.result_callback`
 decorator to register a function that is called after the chain is finished. It
