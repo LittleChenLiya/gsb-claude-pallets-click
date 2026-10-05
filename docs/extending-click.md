@@ -68,6 +68,75 @@ def cli():
     pass
 ```
 
+(lazy-groups)=
+
+## Lazy Groups
+
+A {class}`~click.LazyGroup` is a group that loads subcommands on demand from an
+immutable manifest. The manifest provides command names and short descriptions
+for help and completion without importing all command modules. Commands are
+loaded only when selected or when their help is requested.
+
+This is useful when a group has many subcommands and importing all of them at
+startup would be slow.
+
+```python
+import click
+
+def load_heavy():
+    from heavy_module import heavy_command
+    return heavy_command
+
+manifest = click.LazyManifest([
+    click.LazyCommandEntry("heavy", "A heavy command", load_heavy),
+    click.LazyCommandEntry("other", "Another command", lambda: other_cmd),
+])
+
+cli = click.LazyGroup("cli", manifest=manifest)
+```
+
+The manifest can also be given as a mapping from name to a
+``(short_help, loader)`` or ``(short_help, loader, hidden)`` tuple:
+
+```python
+cli = click.LazyGroup("cli", manifest={
+    "heavy": ("A heavy command", load_heavy),
+    "other": ("Another command", lambda: other_cmd, True),
+})
+```
+
+### Caching and retry
+
+Loaded commands are cached and shared, so the loader is called at most once
+per command. A failed load is cached and raised on subsequent access until
+explicitly retried with {meth}`~click.LazyGroup.retry_load`.
+
+```python
+# First access fails.
+try:
+    cli.get_command(None, "heavy")
+except ValueError:
+    pass
+
+# Subsequent access raises the cached failure.
+try:
+    cli.get_command(None, "heavy")
+except ValueError:
+    pass
+
+# Explicit retry clears the failure and reloads.
+cmd = cli.retry_load("heavy")
+```
+
+### Recursive loading
+
+If a loader recursively tries to load the same command (on the same thread),
+a {class}`RuntimeError` is raised with the loading chain:
+
+```
+RuntimeError: Recursive load detected for command 'heavy': heavy -> heavy
+```
+
 (aliases)=
 
 ## Command Aliases
